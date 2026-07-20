@@ -1,0 +1,32 @@
+FROM python:3.12.11-slim-bookworm
+
+ARG PYTORCH_VERSION=2.12.1
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PATH=/opt/venv/bin:$PATH
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m venv /opt/venv
+
+WORKDIR /app
+
+COPY requirements.txt requirements-worker.txt ./
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir "torch==${PYTORCH_VERSION}" --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir -r requirements-worker.txt
+
+COPY app ./app
+COPY smoke ./smoke
+
+RUN groupadd --system app \
+    && useradd --system --gid app --home-dir /app app \
+    && mkdir -p /data/uploads /data/outputs /data/models \
+    && chown -R app:app /app /data
+
+USER app
+CMD ["python", "-m", "app.worker"]

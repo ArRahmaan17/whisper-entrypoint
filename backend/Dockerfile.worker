@@ -1,0 +1,34 @@
+ARG CUDA_IMAGE=nvidia/cuda:13.3.0-runtime-ubuntu24.04
+FROM ${CUDA_IMAGE}
+
+ARG PYTORCH_VERSION=2.12.1
+ARG PYTORCH_CUDA_CHANNEL=cu132
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PATH=/opt/venv/bin:$PATH
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-venv ffmpeg ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/venv
+
+WORKDIR /app
+
+COPY requirements.txt requirements-worker.txt ./
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir "torch==${PYTORCH_VERSION}" --index-url "https://download.pytorch.org/whl/${PYTORCH_CUDA_CHANNEL}" \
+    && pip install --no-cache-dir -r requirements-worker.txt
+
+COPY app ./app
+
+RUN groupadd --system app \
+    && useradd --system --gid app --home-dir /app app \
+    && mkdir -p /data/uploads /data/outputs /data/models \
+    && chown -R app:app /app /data
+
+USER app
+
+CMD ["python", "-m", "app.worker"]

@@ -1,0 +1,24 @@
+ARG ROCM_IMAGE=rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
+FROM ${ROCM_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt requirements-worker.txt ./
+RUN python3 -m pip install --no-cache-dir -r requirements-worker.txt
+COPY app ./app
+
+RUN groupadd --system app \
+    && useradd --system --gid app --home-dir /app app \
+    && mkdir -p /data/uploads /data/outputs /data/models \
+    && chown -R app:app /app /data
+
+USER app
+CMD ["python3", "-m", "app.worker"]

@@ -1,0 +1,251 @@
+name: whisper-docker
+
+x-app-environment: &app-environment
+  APP_ENV: ${APP_ENV:-development}
+  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://whisper:change-me@postgres:5432/whisper}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  UPLOAD_DIR: ${UPLOAD_DIR:-/data/uploads}
+  OUTPUT_DIR: ${OUTPUT_DIR:-/data/outputs}
+  MODEL_CACHE_DIR: ${MODEL_CACHE_DIR:-/data/models}
+  DEFAULT_ENGINE: ${DEFAULT_ENGINE:-openai-whisper}
+  DEFAULT_DEVICE: ${DEFAULT_DEVICE:-auto}
+  ACCELERATOR_PRIORITY: ${ACCELERATOR_PRIORITY:-cuda,rocm,xpu,openvino,mps,cpu}
+  ALLOW_DEVICE_FALLBACK: ${ALLOW_DEVICE_FALLBACK:-true}
+  ALLOW_CPU_FALLBACK: ${ALLOW_CPU_FALLBACK:-false}
+  MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-1}
+  WORKER_HEARTBEAT_SECONDS: ${WORKER_HEARTBEAT_SECONDS:-10}
+  WORKER_STALE_AFTER_SECONDS: ${WORKER_STALE_AFTER_SECONDS:-30}
+  DEVICE_HEALTH_REFRESH_SECONDS: ${DEVICE_HEALTH_REFRESH_SECONDS:-30}
+  MAX_LOADED_MODELS: ${MAX_LOADED_MODELS:-1}
+  CPU_THREADS: ${CPU_THREADS:-0}
+  MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-2048}
+  MAX_CONCURRENT_GPU_JOBS: ${MAX_CONCURRENT_GPU_JOBS:-1}
+  GPU_TEMP_WARN_C: ${GPU_TEMP_WARN_C:-80}
+  GPU_TEMP_STOP_C: ${GPU_TEMP_STOP_C:-87}
+  GPU_MIN_FREE_VRAM_MB: ${GPU_MIN_FREE_VRAM_MB:-1024}
+  DEFAULT_MODEL: ${DEFAULT_MODEL:-base}
+  DEFAULT_OUTPUT_FORMATS: ${DEFAULT_OUTPUT_FORMATS:-json,srt,txt}
+  JOB_RETENTION_DAYS: ${JOB_RETENTION_DAYS:-30}
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    environment:
+      <<: *app-environment
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:${FRONTEND_PORT:-3000}}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - uploads:/data/uploads
+      - outputs:/data/outputs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  backend-test:
+    profiles: ["test"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: test
+    environment:
+      DATABASE_URL: sqlite:////tmp/whisper-test.db
+      REDIS_URL: redis://127.0.0.1:6379/0
+      UPLOAD_DIR: /tmp/uploads
+      OUTPUT_DIR: /tmp/outputs
+      MODEL_CACHE_DIR: /tmp/models
+      ALLOW_CPU_FALLBACK: "false"
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+
+  worker:
+    profiles: ["cuda"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+      args:
+        CUDA_IMAGE: ${CUDA_IMAGE:-nvidia/cuda:13.3.0-runtime-ubuntu24.04}
+        PYTORCH_VERSION: ${PYTORCH_VERSION:-2.12.1}
+        PYTORCH_CUDA_CHANNEL: ${PYTORCH_CUDA_CHANNEL:-cu132}
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *app-environment
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+      WORKER_NAME: ${WORKER_NAME:-whisper-gpu-0}
+      WORKER_BACKEND: cuda
+      WORKER_DEVICE_INDEX: ${WORKER_DEVICE_INDEX:-}
+    volumes:
+      - uploads:/data/uploads
+      - outputs:/data/outputs
+      - models:/data/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    gpus: all
+    shm_size: "2gb"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  worker-cpu:
+    profiles: ["cpu"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker.cpu
+      args:
+        PYTORCH_VERSION: ${CPU_PYTORCH_VERSION:-2.12.1}
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *app-environment
+      WORKER_NAME: ${CPU_WORKER_NAME:-whisper-cpu-0}
+      WORKER_BACKEND: cpu
+    volumes:
+      - uploads:/data/uploads
+      - outputs:/data/outputs
+      - models:/data/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  worker-rocm:
+    profiles: ["rocm"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker.rocm
+      args:
+        ROCM_IMAGE: ${ROCM_IMAGE:-rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0}
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *app-environment
+      WORKER_NAME: ${ROCM_WORKER_NAME:-whisper-rocm-0}
+      WORKER_BACKEND: rocm
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    volumes:
+      - uploads:/data/uploads
+      - outputs:/data/outputs
+      - models:/data/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    shm_size: "8gb"
+    restart: unless-stopped
+
+  worker-xpu:
+    profiles: ["xpu"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker.xpu
+      args:
+        PYTORCH_VERSION: ${XPU_PYTORCH_VERSION:-2.11.0}
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *app-environment
+      WORKER_NAME: ${XPU_WORKER_NAME:-whisper-xpu-0}
+      WORKER_BACKEND: xpu
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - render
+    volumes:
+      - uploads:/data/uploads
+      - outputs:/data/outputs
+      - models:/data/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4.2-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  postgres:
+    image: postgres:17.5-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-whisper}
+      POSTGRES_USER: ${POSTGRES_USER:-whisper}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  uploads:
+  outputs:
+  models:
+  redis-data:
+  postgres-data:
