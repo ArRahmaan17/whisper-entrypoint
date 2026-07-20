@@ -54,8 +54,9 @@ Only the selected worker receives access to its accelerator devices. Workers are
 
 Every deployment needs:
 
-- A Linux amd64 host for the Docker worker profiles
-- Docker Engine
+- A Linux container runtime on an amd64 host. Use Docker Engine on Linux or
+  Docker Desktop with the WSL 2 backend on Windows.
+- Docker Engine or Docker Desktop
 - Docker Compose v2 (`docker compose`, not the legacy `docker-compose` command)
 - Git
 - Enough disk space for Docker images and downloaded Whisper models
@@ -68,7 +69,133 @@ docker compose version
 docker info
 ```
 
-CPU mode needs no GPU driver. CUDA, ROCm, and XPU mode each require the corresponding driver and device support on the host; those drivers are not installed inside the application container.
+CPU mode needs no GPU driver. CUDA, ROCm, and XPU mode each require the corresponding driver and device support on the host; those drivers are not installed inside the application container. On Windows, use the CPU or NVIDIA CUDA profile through Docker Desktop. The ROCm and XPU profiles require a native Linux host.
+
+## Windows: Docker Compose Setup
+
+This project does not run as a native Windows application. Docker Desktop runs
+the existing Linux containers through WSL 2, while PowerShell controls the same
+[`compose.yaml`](./compose.yaml) used on Linux. No Windows-specific Compose file
+is required.
+
+### 1. Install WSL 2 and Docker Desktop
+
+In an Administrator PowerShell window, install WSL if it is not already
+installed, then restart Windows when requested:
+
+```powershell
+wsl --install
+```
+
+Update an existing WSL installation with:
+
+```powershell
+wsl --update
+wsl --version
+```
+
+Install [Docker Desktop for Windows](https://docs.docker.com/desktop/setup/install/windows-install/),
+start it, and ensure **Settings → General → Use the WSL 2 based engine** is
+enabled. Docker Desktop must be using **Linux containers**, not Windows
+containers. Docker documents the WSL configuration in its
+[WSL 2 backend guide](https://docs.docker.com/desktop/features/wsl/).
+
+Open a normal PowerShell window and verify the Docker daemon and Compose:
+
+```powershell
+docker --version
+docker compose version
+docker info --format '{{.OSType}}'
+```
+
+The last command must print `linux`.
+
+### 2. Clone and configure the project
+
+```powershell
+git clone https://github.com/ArRahmaan17/whisper-entrypoint.git
+Set-Location whisper-entrypoint
+
+if (-not (Test-Path .env)) {
+    Copy-Item .env.example .env
+}
+notepad .env
+```
+
+In `.env`, replace `change-me` in both settings with the same strong,
+URL-safe password (letters, numbers, `_`, and `-` are safe here):
+
+```text
+POSTGRES_PASSWORD=use-a-strong-password
+DATABASE_URL=postgresql+psycopg://whisper:use-a-strong-password@postgres:5432/whisper
+```
+
+Validate the resolved Compose configuration:
+
+```powershell
+docker compose config --quiet
+```
+
+No output means the configuration is valid.
+
+### 3. Start the CPU stack
+
+Start with CPU mode to verify the complete application:
+
+```powershell
+docker compose --profile cpu up -d --build
+docker compose --profile cpu ps
+Invoke-RestMethod http://localhost:8000/health
+```
+
+Then open:
+
+- Web UI: http://localhost:3000
+- API documentation: http://localhost:8000/docs
+
+Useful PowerShell operations are:
+
+```powershell
+# Follow the CPU worker log (Ctrl+C only stops following the log)
+docker compose --profile cpu logs -f worker-cpu
+
+# Stop the stack while preserving named volumes
+docker compose down
+
+# Start it again
+docker compose --profile cpu up -d
+```
+
+The Linux `make` shortcuts are not required on Windows. If commands are run
+from a WSL Linux terminal instead of PowerShell, the existing `make up-cpu` and
+other Makefile targets remain available.
+
+### 4. Optional NVIDIA CUDA profile
+
+Docker Desktop GPU access on Windows requires its WSL 2 backend, a supported
+NVIDIA GPU, current Windows NVIDIA drivers, and an up-to-date WSL kernel. See
+Docker's [Windows GPU prerequisites](https://docs.docker.com/desktop/features/gpu/).
+Do not install a Linux NVIDIA display driver inside WSL or this project.
+
+After updating the Windows NVIDIA driver and running `wsl --update`, validate
+GPU access from PowerShell using the same CUDA image configured by the project:
+
+```powershell
+nvidia-smi
+docker run --rm --gpus all nvidia/cuda:13.3.0-runtime-ubuntu24.04 nvidia-smi
+```
+
+Only start the CUDA stack if that container test succeeds:
+
+```powershell
+docker compose down
+docker compose --profile cuda up -d --build
+docker compose --profile cuda ps
+docker compose --profile cuda logs -f worker
+```
+
+The `make preflight` command is a Bash/Linux helper. The `docker run --gpus all`
+check above performs the required GPU-passthrough check when using PowerShell.
 
 ## Quick Start: CPU
 
